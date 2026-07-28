@@ -1,3 +1,15 @@
 #!/usr/bin/env bash
 
 touch did_build
+
+WIF_PROVIDER=projects/393725241020/locations/global/workloadIdentityPools/repl-identity/providers/repl-rp-replit-usc1
+
+gcloud iam workload-identity-pools create-cred-config $WIF_PROVIDER \
+    --service-account="zergrush-zergling-dev@replit-goval-dev.iam.gserviceaccount.com" \
+    --credential-source-url="http://127.0.0.1:1106/identityv2/gcloud/token" \
+    --credential-source-headers="X-Replit-Identity-Audience=//iam.googleapis.com/$WIF_PROVIDER" \
+    --credential-source-type="json" \
+    --credential-source-field-name="id_token" \
+    --output-file="$HOME/.config/gcloud/wif-profile.json"
+
+gcloud auth login --cred-file="$HOME/.config/gcloud/wif-profile.json"
