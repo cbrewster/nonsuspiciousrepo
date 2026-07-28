@@ -23,6 +23,12 @@ trap 'rm -rf "$GNUPGHOME"' EXIT
 
 APT_OPTS=(-y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
 
+# ---- clear any half-written state from a previous failed run -------------
+# The repo line must NOT be present during the bootstrap update below, or apt
+# fails on NO_PUBKEY before we've had a chance to install the key.
+rm -f /etc/apt/sources.list.d/google-cloud-sdk.list \
+      /usr/share/keyrings/cloud.google.gpg
+
 # ---- base packages ------------------------------------------------------
 apt-get update
 apt-get install "${APT_OPTS[@]}" ca-certificates gnupg curl
@@ -33,6 +39,11 @@ curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 \
   https://packages.cloud.google.com/apt/doc/apt-key.gpg \
   | gpg --batch --yes --dearmor -o /usr/share/keyrings/cloud.google.gpg
 chmod 0644 /usr/share/keyrings/cloud.google.gpg
+
+# an empty/garbage keyring is what caused the NO_PUBKEY loop; fail loudly here
+# instead of leaving a broken source behind.
+[[ -s /usr/share/keyrings/cloud.google.gpg ]] || { echo "keyring is empty" >&2; exit 1; }
+gpg --batch --no-default-keyring --keyring /usr/share/keyrings/cloud.google.gpg --list-keys >/dev/null
 
 # '>' not 'tee -a' so re-runs don't duplicate the entry
 install -d -m 0755 /etc/apt/sources.list.d
