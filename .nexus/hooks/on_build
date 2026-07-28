@@ -1,27 +1,74 @@
 #!/usr/bin/env bash
+set -euxo pipefail
 
-set -eo pipefail
+# ---- idempotency guard -------------------------------------------------
+if [[ -f did_build ]]; then
+  echo "did_build present; nothing to do."
+  exit 0
+fi
+
+# ---- non-interactive environment ---------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a          # Ubuntu 22.04+ needrestart prompts otherwise
+export NEEDRESTART_SUSPEND=1
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
+: "${HOME:=/root}"
+export CLOUDSDK_CONFIG="${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}"
+
+# gpg gets its own throwaway homedir so it never touches ~/.gnupg
+GNUPGHOME="$(mktemp -d)"
+export GNUPGHOME
+trap 'rm -rf "$GNUPGHOME"' EXIT
+
+APT_OPTS=(-y -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef)
+
+# ---- base packages ------------------------------------------------------
+apt-get update
+apt-get install "${APT_OPTS[@]}" ca-certificates gnupg curl
+
+# ---- google apt repo ----------------------------------------------------
+install -d -m 0755 /usr/share/keyrings
+curl -fsSL --retry 5 --retry-connrefused --retry-delay 2 \
+  https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | gpg --batch --yes --dearmor -o /usr/share/keyrings/cloud.google.gpg
+chmod 0644 /usr/share/keyrings/cloud.google.gpg
+
+# '>' not 'tee -a' so re-runs don't duplicate the entry
+install -d -m 0755 /etc/apt/sources.list.d
+cat > /etc/apt/sources.list.d/google-cloud-sdk.list <<'EOF'
+deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main
+EOF
 
 apt-get update
+apt-get install "${APT_OPTS[@]}" google-cloud-cli
 
-apt-get install ca-certificates gnupg curl
-
-curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-
-echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
-
-apt-get update && apt-get install -y google-cloud-cli
-
+# ---- workload identity federation ---------------------------------------
 WIF_PROVIDER=projects/393725241020/locations/global/workloadIdentityPools/repl-identity/providers/repl-rp-replit-usc1
+IDENTITY_URL="http://127.0.0.1:1106/identityv2/gcloud/token"
 
-gcloud iam workload-identity-pools create-cred-config $WIF_PROVIDER \
-    --service-account="zergrush-zergling-dev@replit-goval-dev.iam.gserviceaccount.com" \
-    --credential-source-url="http://127.0.0.1:1106/identityv2/gcloud/token" \
-    --credential-source-headers="X-Replit-Identity-Audience=//iam.googleapis.com/$WIF_PROVIDER" \
-    --credential-source-type="json" \
-    --credential-source-field-name="id_token" \
-    --output-file="$HOME/.config/gcloud/wif-profile.json"
+mkdir -p "$CLOUDSDK_CONFIG"
 
-gcloud auth login --cred-file="$HOME/.config/gcloud/wif-profile.json"
+gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+  --quiet \
+  --service-account="zergrush-zergling-dev@replit-goval-dev.iam.gserviceaccount.com" \
+  --credential-source-url="$IDENTITY_URL" \
+  --credential-source-headers="X-Replit-Identity-Audience=//iam.googleapis.com/$WIF_PROVIDER" \
+  --credential-source-type="json" \
+  --credential-source-field-name="id_token" \
+  --output-file="$CLOUDSDK_CONFIG/wif-profile.json"
+
+# the local identity server is what actually gets called at login time;
+# in a cold container it may not be listening yet.
+for i in {1..30}; do
+  curl -fsS -o /dev/null --max-time 2 \
+    -H "X-Replit-Identity-Audience=//iam.googleapis.com/$WIF_PROVIDER" \
+    "$IDENTITY_URL" && break
+  [[ $i -eq 30 ]] && { echo "identity endpoint never came up" >&2; exit 1; }
+  sleep 2
+done
+
+gcloud auth login --quiet --cred-file="$CLOUDSDK_CONFIG/wif-profile.json"
+gcloud auth list --quiet
 
 touch did_build
