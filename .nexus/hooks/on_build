@@ -69,15 +69,29 @@ gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
   --credential-source-field-name="id_token" \
   --output-file="$CLOUDSDK_CONFIG/wif-profile.json"
 
-# the local identity server is what actually gets called at login time;
-# in a cold container it may not be listening yet.
+# Wait for the local identity server to start listening. This checks TCP only:
+# an HTTP error still means the server is up, so it must not count as "down".
 for i in {1..30}; do
-  curl -fsS -o /dev/null --max-time 2 \
-    -H "X-Replit-Identity-Audience=//iam.googleapis.com/$WIF_PROVIDER" \
-    "$IDENTITY_URL" && break
-  [[ $i -eq 30 ]] && { echo "identity endpoint never came up" >&2; exit 1; }
+  timeout 2 bash -c ': < /dev/tcp/127.0.0.1/1106' 2>/dev/null && break
+  [[ $i -eq 30 ]] && { echo "nothing listening on 127.0.0.1:1106" >&2; exit 1; }
   sleep 2
 done
+
+# Confirm it will actually mint a token, and surface the error body if not.
+# NOTE: curl wants "Name: Value"; gcloud's --credential-source-headers wants
+# "Name=Value". Using '=' here sends a header with no colon, which is malformed
+# HTTP and gets you a bare 400 from the server.
+probe_out="$(mktemp)"
+http_code="$(curl -sS -o "$probe_out" -w '%{http_code}' --max-time 10 \
+  -H "X-Replit-Identity-Audience: //iam.googleapis.com/$WIF_PROVIDER" \
+  "$IDENTITY_URL")" || http_code=000
+if [[ "$http_code" != 200 ]]; then
+  echo "identity endpoint returned HTTP $http_code:" >&2
+  head -c 500 "$probe_out" >&2; echo >&2
+  rm -f "$probe_out"
+  exit 1
+fi
+rm -f "$probe_out"
 
 gcloud auth login --quiet --cred-file="$CLOUDSDK_CONFIG/wif-profile.json"
 gcloud auth list --quiet
