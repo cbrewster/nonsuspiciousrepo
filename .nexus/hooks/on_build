@@ -7,6 +7,8 @@ if [[ -f did_build ]]; then
   exit 0
 fi
 
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 # ---- non-interactive environment ---------------------------------------
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a          # Ubuntu 22.04+ needrestart prompts otherwise
